@@ -1,0 +1,63 @@
+---
+- name: Build the Windows target list from the form
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Stop if no IPs were entered
+      ansible.builtin.assert:
+        that: ((windows_ips | default('')).split(',') | map('trim') | select | list | length) > 0
+        fail_msg: "windows_ips is empty - enter at least one server IP"
+
+    - name: Remember the requested IPs
+      ansible.builtin.set_fact:
+        report_windows_hosts: "{{ (windows_ips | default('')).split(',') | map('trim') | select | list }}"
+
+    - name: Add Windows targets
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups: windows_targets
+        ansible_connection: winrm
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_port: 5985
+      loop: "{{ report_windows_hosts }}"
+
+- name: Collect OS details from the selected Windows servers (read-only)
+  hosts: windows_targets
+  gather_facts: no
+  tasks:
+    - name: Read OS name, exact build, uptime and last installed update
+      ansible.windows.win_shell: |
+        $os = Get-CimInstance Win32_OperatingSystem
+        $v = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+        $days = [math]::Round(((Get-Date) - $os.LastBootUpTime).TotalDays, 1)
+        $hf = Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 1
+        $last = 'n/a'
+        if ($hf -and $hf.InstalledOn) { $last = "$($hf.HotFixID) on $($hf.InstalledOn.ToString('yyyy-MM-dd'))" }
+        "$($os.Caption)|$($v.CurrentBuildNumber).$($v.UBR)|${days}d|$last"
+      register: win_info
+      changed_when: false
+      ignore_unreachable: true
+
+- name: Print the report
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Build the report text
+      ansible.builtin.set_fact:
+        report_text: |
+          {{ '%-17s %-38s %-14s %-9s %s' | format('IP', 'OS', 'BUILD', 'UPTIME', 'LAST UPDATE') }}
+          {{ '-' * 100 }}
+          {% for h in report_windows_hosts %}
+          {% set out = (hostvars[h].win_info.stdout | default('')) | trim %}
+          {% if out != '' %}
+          {% set p = out.split('|') %}
+          {{ '%-17s %-38s %-14s %-9s %s' | format(h, p[0] | replace('Microsoft ', ''), p[1], p[2], p[3]) }}
+          {% else %}
+          {{ '%-17s %s' | format(h, 'NO DATA (unreachable or login failed)') }}
+          {% endif %}
+          {% endfor %}
+
+    - name: Show the report
+      ansible.builtin.debug:
+        msg: "{{ report_text }}"
