@@ -1,0 +1,52 @@
+---
+- name: Work out which Windows servers to patch
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Read the requested IPs and what AWS discovered
+      ansible.builtin.set_fact:
+        requested_windows_ips: "{{ (windows_ips | default('')).split(',') | map('trim') | select | list }}"
+        all_discovered_windows: "{{ groups['tag_OSFamily_windows'] | default([]) }}"
+
+    - name: Stop if no IPs were entered
+      ansible.builtin.assert:
+        that: requested_windows_ips | length > 0
+        fail_msg: "windows_ips is empty - enter at least one server IP"
+
+    - name: Show requested vs discovered
+      ansible.builtin.debug:
+        msg:
+          - "You asked for:  {{ requested_windows_ips }}"
+          - "AWS discovered: {{ all_discovered_windows }}"
+
+    - name: Stop if any requested IP was not found
+      ansible.builtin.assert:
+        that: (requested_windows_ips | difference(all_discovered_windows)) | length == 0
+        fail_msg: "Not found among running, tagged Windows servers: {{ requested_windows_ips | difference(all_discovered_windows) }}"
+        success_msg: "All requested Windows IPs were found"
+
+    - name: Remember the selected servers
+      ansible.builtin.set_fact:
+        selected_windows_hosts: "{{ requested_windows_ips }}"
+
+- name: Patch the selected Windows servers
+  hosts: "{{ hostvars['localhost']['selected_windows_hosts'] }}"
+  gather_facts: no
+  tasks:
+    - name: Check we can log in over WinRM
+      ansible.windows.win_ping:
+
+    - name: Install all available updates
+      ansible.windows.win_updates:
+        category_names: [SecurityUpdates, CriticalUpdates, UpdateRollups]
+      register: update_result
+      ignore_errors: yes
+
+    - name: Reboot if required
+      ansible.windows.win_reboot:
+      when: update_result.reboot_required
+
+    - name: Second pass to catch anything left
+      ansible.windows.win_updates:
+        category_names: [SecurityUpdates, CriticalUpdates, UpdateRollups]
+      ignore_errors: yes
