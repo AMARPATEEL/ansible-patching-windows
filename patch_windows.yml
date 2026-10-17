@@ -1,1 +1,38 @@
+---
+- name: Build the Windows target list from the form
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Stop if no IPs were entered
+      ansible.builtin.assert:
+        that: ((windows_ips | default('')).split(',') | map('trim') | select | list | length) > 0
+        fail_msg: "windows_ips is empty - enter at least one server IP"
 
+    - name: Add Windows targets
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups: windows_targets
+        ansible_connection: winrm
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_port: 5985
+      loop: "{{ (windows_ips | default('')).split(',') | map('trim') | select | list }}"
+
+- name: Patch Windows servers
+  hosts: windows_targets
+  gather_facts: no
+  tasks:
+    - name: Install all available updates
+      ansible.windows.win_updates:
+        category_names: [SecurityUpdates, CriticalUpdates, UpdateRollups]
+      register: update_result
+      ignore_errors: yes
+
+    - name: Reboot if required
+      ansible.windows.win_reboot:
+      when: update_result.reboot_required
+
+    - name: Second pass to catch anything left
+      ansible.windows.win_updates:
+        category_names: [SecurityUpdates, CriticalUpdates, UpdateRollups]
+      ignore_errors: yes
